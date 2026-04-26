@@ -1,34 +1,50 @@
-FROM debian:bullseye-slim AS builder
-# install dependencies
-RUN apt-get update && \
-   apt-get install -y upx-ucl git zlib1g-dev gcc binutils make g++ autoconf automake
+# syntax=docker/dockerfile:1
 
-RUN git clone https://github.com/bwa-mem2/bwa-mem2 && \
-   cd bwa-mem2 && \
-   git submodule init && \
-   git submodule update && \
-   sed -i '/CXXFLAGS/s/$/ -static-libgcc -static-libstdc++/' Makefile && \
-   sed -i '/LDFLAGS/s/$/ -static -lpthread -lz -ldl/' Makefile  && \  
-   make -j && \
-   upx bwa-mem2.avx && \
-   upx bwa-mem2.avx2 && \
-   upx bwa-mem2.sse41 && \
-   upx bwa-mem2.sse42 && \
-   upx bwa-mem2.avx512bw
+FROM debian:bookworm AS builder
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        g++ \
+        git \
+        libnuma-dev \
+        make \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
 
- 
+WORKDIR /src
+RUN git clone --depth 1 --recurse-submodules https://github.com/bwa-mem2/bwa-mem2.git
 
-FROM gcr.io/distroless/base
+WORKDIR /src/bwa-mem2
+RUN make -j"$(nproc)" \
+    && install -d /out/usr/local/libexec /out/usr/local/bin \
+    && for bin in bwa-mem2 bwa-mem2.avx bwa-mem2.avx2 bwa-mem2.avx512bw bwa-mem2.sse41 bwa-mem2.sse42; do \
+        if [ -x "$bin" ]; then install -m755 "$bin" "/out/usr/local/libexec/$bin"; fi; \
+    done \
+    && printf '%s\n' \
+        '#!/bin/sh' \
+        'set -eu' \
+        'if [ "${1:-}" = "bwa-mem2" ]; then shift; fi' \
+        'if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then' \
+        '  /usr/local/libexec/bwa-mem2 >/dev/stdout 2>/dev/stderr || true' \
+        '  exit 0' \
+        'fi' \
+        'exec /usr/local/libexec/bwa-mem2 "$@"' \
+      > /out/usr/local/bin/bwa-mem2 \
+    && chmod +x /out/usr/local/bin/bwa-mem2
 
-COPY --from=builder /bwa-mem2/bwa-mem2 /usr/local/bin/
-COPY --from=builder /bwa-mem2/bwa-mem2.avx /usr/local/bin/
-COPY --from=builder /bwa-mem2/bwa-mem2.avx2 /usr/local/bin/
-COPY --from=builder /bwa-mem2/bwa-mem2.sse41 /usr/local/bin/
-COPY --from=builder /bwa-mem2/bwa-mem2.sse42 /usr/local/bin/
-COPY --from=builder /bwa-mem2/bwa-mem2.avx512bw /usr/local/bin/
+FROM debian:bookworm-slim
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libgomp1 \
+        libnuma1 \
+        zlib1g \
+    && rm -rf /var/lib/apt/lists/*
 
+COPY --from=builder /out/ /
+WORKDIR /data
 
-
-ENTRYPOINT ["/usr/local/bin/bwa-mem2"]/
+ENTRYPOINT ["/usr/local/bin/bwa-mem2"]
+CMD ["--help"]
